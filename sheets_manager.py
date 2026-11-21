@@ -75,6 +75,37 @@ def _get_gspread_client() -> Optional[gspread.Client]:
     return None
 
 
+def _get_service_account_email(gc: gspread.Client) -> str:
+    http_auth = getattr(getattr(gc, "http_client", None), "auth", None)
+    if http_auth:
+        email = getattr(http_auth, "service_account_email", "") or getattr(
+            http_auth, "signer_email", ""
+        )
+        if email:
+            return email
+
+    raw = settings.GOOGLE_CREDENTIALS_JSON
+    if raw:
+        try:
+            info = (
+                json.loads(raw)
+                if raw.startswith("{")
+                else json.loads(base64.b64decode(raw).decode("utf-8"))
+            )
+            return info.get("client_email", "")
+        except Exception:
+            return ""
+
+    if os.path.exists(settings.GOOGLE_CREDENTIALS_FILE):
+        try:
+            with open(settings.GOOGLE_CREDENTIALS_FILE, "r", encoding="utf-8") as f:
+                return json.load(f).get("client_email", "")
+        except Exception:
+            return ""
+
+    return ""
+
+
 def _style_header(ws: gspread.Worksheet, bg_rgb: Dict[str, float]) -> None:
     try:
         ws.freeze(rows=1)
@@ -139,9 +170,7 @@ def _provision_sheets_sync(
     if not gc:
         return None, None, None, None
 
-    sa_email = getattr(gc.auth, "service_account_email", None) or getattr(
-        gc.auth, "signer_email", ""
-    )
+    sa_email = _get_service_account_email(gc)
     created = _create_sheets_via_apps_script(business_name, sa_email)
 
     main_id = created["main_id"]
