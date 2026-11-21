@@ -37,9 +37,12 @@ async def lifespan(app: FastAPI):
 
     bot_task = None
     if settings.BOT_TOKEN and "DUMMY" not in settings.BOT_TOKEN:
-        bot_task = asyncio.create_task(
-            dp.start_polling(bot, handle_signals=False)
-        )
+        async def _poll():
+            try:
+                await dp.start_polling(bot, handle_signals=False, drop_pending_updates=True)
+            except Exception as e:
+                logger.exception("TELEGRAM BOT XATOSI: %s", e)
+        bot_task = asyncio.create_task(_poll())
         logger.info("Telegram SaaS Bot polling started.")
     else:
         logger.warning("BOT_TOKEN missing — running FastAPI webhook server only.")

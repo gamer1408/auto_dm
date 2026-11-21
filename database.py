@@ -24,7 +24,12 @@ def _normalize_db_url(raw_url: str) -> str:
     if raw_url.startswith("postgres://"):
         return raw_url.replace("postgres://", "postgresql+asyncpg://", 1)
     if raw_url.startswith("postgresql://") and "+asyncpg" not in raw_url:
-        return raw_url.replace("postgresql://", "postgresql+asyncpg://", 1)
+        raw_url = raw_url.replace("postgresql://", "postgresql+asyncpg://", 1)
+    if "sslmode=" in raw_url:
+        base, _, query = raw_url.partition("?")
+        parts = [q for q in query.split("&") if q and not q.startswith(("sslmode=", "channel_binding="))]
+        parts.append("ssl=require")
+        raw_url = base + "?" + "&".join(parts)
     return raw_url
 
 
