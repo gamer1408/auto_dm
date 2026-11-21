@@ -52,10 +52,10 @@ class PlanSpec:
 
 
 PLANS: Dict[str, PlanSpec] = {
-    # --- FREE TRIALS ---
+    # --- BONUS STARTER TRIALS ---
     "FREE_CPL": PlanSpec(
         code="FREE_CPL",
-        name="Sinov (15 ta Bepul Lid)",
+        name="Bonus Start (15 ta Lid)",
         mode="CPL",
         price_uzs=0,
         leads_limit=15,
@@ -63,11 +63,11 @@ PLANS: Dict[str, PlanSpec] = {
         overage_price=2000,
         contacts_limit=0,
         queue_delay_sec=12,
-        description="15 ta tayyor telefon raqam Google Sheets'ga tushguncha bepul sinov.",
+        description="15 ta tayyor telefon raqam Google Sheets'ga tushguncha bonus sinov.",
     ),
     "FREE_CP": PlanSpec(
         code="FREE_CP",
-        name="Sinov Creator (100 ta DM)",
+        name="Bonus Creator (100 ta DM)",
         mode="CP",
         price_uzs=0,
         leads_limit=0,
@@ -75,7 +75,7 @@ PLANS: Dict[str, PlanSpec] = {
         overage_price=0,
         contacts_limit=100,
         queue_delay_sec=12,
-        description="100 ta noyob odamga izoh javobi + Direct havola yuborish.",
+        description="100 ta noyob odamga izoh javobi + Direct havola yuborish (bonus).",
     ),
     # --- CREATOR (C + P) ---
     "CP_1K": PlanSpec(
@@ -165,63 +165,30 @@ PLANS: Dict[str, PlanSpec] = {
     ),
 }
 
-SCRIPT_TEMPLATES: Dict[str, Dict[str, str]] = {
-    "shop": {
-        "title": "Onlayn Do'kon (Tovar sotuv)",
-        "mode": "CPL",
-        "comment_reply": "Assalomu alaykum! Narx va batafsil ma'lumotni Direct'ingizga yubordik ✅",
+DEFAULT_SCRIPTS: Dict[str, Dict[str, str]] = {
+    "CPL": {
+        "comment_reply": "Assalomu alaykum! Batafsil ma'lumotni Direct'ingizga yubordik ✅",
         "dm_welcome": (
             "Assalomu alaykum! Qiziqishingiz uchun rahmat.\n"
-            "Mahsulotimiz hozir mavjud va O'zbekiston bo'ylab yetkazib beramiz.\n\n"
-            "Buyurtma berish yoki batafsil maslahat olishni xohlaysizmi? "
-            "Davom etish uchun «Ha» deb yozing 👇"
+            "Batafsil ma'lumot berishimiz va bog'lanishimiz uchun telefon raqamingizni "
+            "yozib qoldiring (masalan: +998901234567):"
         ),
-        "ask_name": "Ajoyib! Sizga qanday murojaat qilsak bo'ladi? Ismingizni yozing:",
-        "ask_phone": "Rahmat, {name}! Menejerimiz bog'lanishi uchun telefon raqamingizni qoldiring (masalan: +998901234567):",
-        "ask_qty": "Nechta dona buyurtma bermoqchisiz? (yoki qaysi rang/o'lcham kerak?):",
-        "done": "Rahmat, {name}! Buyurtmangiz qabul qilindi ✅ Tez orada menejerimiz {phone} raqamiga bog'lanadi.",
+        "ask_name": "Ismingizni yozib qoldiring:",
+        "ask_phone": "Bog'lanishimiz uchun telefon raqamingizni yozing (masalan: +998901234567):",
+        "ask_qty": "Rahmat! Qo'shimcha ma'lumot yoki miqdorni yozib qoldiring:",
+        "done": "Rahmat! Ma'lumotingiz qabul qilindi ✅ Tez orada {phone} raqamiga bog'lanamiz.",
     },
-    "edu": {
-        "title": "O'quv Markaz / Kurslar",
-        "mode": "CPL",
-        "comment_reply": "Assalomu alaykum! Kurs dasturi va narxlarni Direct'ga yubordik ✅",
+    "CP": {
+        "comment_reply": "Direct'ingizga havolani yubordik, tekshirib ko'ring! ✅",
         "dm_welcome": (
-            "Assalomu alaykum! Kurslarimizga qiziqqaningiz uchun rahmat.\n"
-            "Bepul sinov darsiga yozilish va chegirma olishni xohlaysizmi?\n\n"
-            "Ro'yxatdan o'tish uchun «Ha» deb yozing 👇"
-        ),
-        "ask_name": "Ajoyib! Ismingizni yozib qoldiring:",
-        "ask_phone": "Rahmat, {name}! Bog'lanishimiz uchun telefon raqamingizni yozing (+998...):",
-        "ask_qty": "Qaysi yo'nalish yoki vaqt (ertalab/kechqurun) sizga qulay?",
-        "done": "Ajoyib, {name}! Siz ro'yxatga olindingiz ✅ Administratorimiz tez orada {phone} raqamiga qo'ng'iroq qiladi.",
-    },
-    "clinic": {
-        "title": "Klinika / Go'zallik Saloni",
-        "mode": "CPL",
-        "comment_reply": "Assalomu alaykum! Narxlar va qabul vaqtini Direct'ingizga yubordik ✅",
-        "dm_welcome": (
-            "Assalomu alaykum! Xizmatlarimizga qiziqish bildirganingiz uchun rahmat.\n"
-            "Bepul konsultatsiya yoki qabulga yozilishni istaysizmi?\n\n"
-            "Yozilish uchun «Ha» deb javob bering 👇"
-        ),
-        "ask_name": "Marhamat, ismingizni yozing:",
-        "ask_phone": "Rahmat, {name}! Qabul vaqtini tasdiqlash uchun telefon raqamingizni qoldiring (+998...):",
-        "ask_qty": "Qaysi kun yoki qaysi xizmat turi sizni qiziqtirmoqda?",
-        "done": "Rahmat, {name}! Arizangiz qabul qilindi ✅ Administratorimiz tez orada {phone} raqamiga bog'lanadi.",
-    },
-    "creator": {
-        "title": "Bloger / Ekspert (C+P Link)",
-        "mode": "CP",
-        "comment_reply": "Direct'ingizga havolani yubordim, tekshirib ko'ring! ✅",
-        "dm_welcome": (
-            "Salom! So'ragan foydali materialingiz / havolangiz tayyor:\n\n"
+            "Assalomu alaykum! So'ragan havolangiz tayyor:\n\n"
             "{link}\n\n"
             "Foydali bo'lsa saqlab qo'ying!"
         ),
         "ask_name": "Ismingizni yozing:",
         "ask_phone": "Telefon raqamingizni yozing (+998...):",
-        "ask_qty": "Miqdorini yozing:",
-        "done": "Rahmat! Ma'lumotingiz saqlandi.",
+        "ask_qty": "Qo'shimcha ma'lumot yoki miqdorni yozing:",
+        "done": "Rahmat! Ma'lumotingiz saqlandi ✅",
     },
 }
 

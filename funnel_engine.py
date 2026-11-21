@@ -77,8 +77,9 @@ async def handle_incoming_dm(
 ) -> None:
     """
     Process incoming Direct Message for C+P+L funnel.
-    Works EVEN AFTER comment_active == False so late responders from previous DMs
-    complete their order and go into the Private Reserve Sheet!
+    Supports:
+      - 1-step Quick Lead (DM 1 -> Phone -> Save to Google Sheets)
+      - 2-step Full Order (DM 1 -> Phone -> DM 2 [Qty/Note] -> Save to Google Sheets)
     """
     if not sender_id or sender_id == ig_business_id:
         return
@@ -105,58 +106,44 @@ async def handle_incoming_dm(
         if not sess or sess.step == "DONE":
             return
 
-        # STEP 1: WAIT_CONFIRM
-        if sess.step == "WAIT_CONFIRM":
-            if is_positive_reply(text):
-                sess.step = "WAIT_NAME"
-                await db.commit()
-                await ig_api.send_dm(
-                    tenant.ig_user_id, sender_id, tenant.ask_name_text, tenant.page_access_token
-                )
-            else:
-                hint = (
-                    "Buyurtma yoki maslahat olish uchun «Ha» deb yozing, "
-                    "darhol rasmiylashtirib beramiz."
-                )
-                await ig_api.send_dm(tenant.ig_user_id, sender_id, hint, tenant.page_access_token)
-            return
-
-        # STEP 2: WAIT_NAME
-        if sess.step == "WAIT_NAME":
-            if len(text) < 2 or len(text) > 80:
-                await ig_api.send_dm(
-                    tenant.ig_user_id,
-                    sender_id,
-                    "Iltimos, ismingizni to'g'ri yozing:",
-                    tenant.page_access_token,
-                )
-                return
-            sess.temp_name = text
-            sess.step = "WAIT_PHONE"
-            await db.commit()
-            msg = tenant.ask_phone_text.replace("{name}", sess.temp_name)
-            await ig_api.send_dm(tenant.ig_user_id, sender_id, msg, tenant.page_access_token)
-            return
-
-        # STEP 3: WAIT_PHONE
-        if sess.step == "WAIT_PHONE":
+        # STEP 1 (WAIT_CONFIRM / WAIT_PHONE): Capture phone immediately or prompt for phone
+        if sess.step in {"WAIT_CONFIRM", "WAIT_PHONE"}:
             phone = normalize_uz_phone(text)
             if not phone:
-                await ig_api.send_dm(
-                    tenant.ig_user_id,
-                    sender_id,
-                    "Raqam formati noto'g'ri. Iltimos, O'zbekiston raqamini kiriting (masalan: +998901234567):",
-                    tenant.page_access_token,
+                sess.step = "WAIT_PHONE"
+                await db.commit()
+                prompt = (
+                    tenant.ask_phone_text
+                    if is_positive_reply(text)
+                    else "Bog'lanishimiz uchun O'zbekiston telefon raqamingizni yozing (masalan: +998901234567):"
                 )
+                await ig_api.send_dm(tenant.ig_user_id, sender_id, prompt, tenant.page_access_token)
                 return
+
             sess.temp_phone = phone
-            sess.step = "WAIT_QTY"
-            await db.commit()
-            msg = tenant.ask_qty_text.replace("{name}", sess.temp_name).replace("{phone}", phone)
-            await ig_api.send_dm(tenant.ig_user_id, sender_id, msg, tenant.page_access_token)
+            if not sess.temp_name:
+                sess.temp_name = f"@{sess.customer_username}" if sess.customer_username else "Instagram Mijoz"
+
+            # If DM 2-xabar is enabled -> ask 2nd question; otherwise finish immediately!
+            if tenant.ask_qty_enabled:
+                sess.step = "WAIT_QTY"
+                await db.commit()
+                msg = tenant.ask_qty_text.replace("{name}", sess.temp_name).replace("{phone}", phone)
+                await ig_api.send_dm(tenant.ig_user_id, sender_id, msg, tenant.page_access_token)
+                return
+
+            sess.temp_qty = "-"
+            sess.step = "DONE"
+            done_msg = (
+                tenant.done_text.replace("{name}", sess.temp_name)
+                .replace("{phone}", sess.temp_phone)
+                .replace("{qty}", "-")
+            )
+            await ig_api.send_dm(tenant.ig_user_id, sender_id, done_msg, tenant.page_access_token)
+            await _record_completed_lead(db, tenant, sess)
             return
 
-        # STEP 4: WAIT_QTY -> FINALIZE & LEAD ACCOUNTING
+        # STEP 2 (WAIT_QTY — DM 2-xabar): Capture note/quantity & finalize
         if sess.step == "WAIT_QTY":
             sess.temp_qty = text[:180]
             sess.step = "DONE"
@@ -174,13 +161,10 @@ async def handle_incoming_dm(
 async def _record_completed_lead(db, tenant: Tenant, sess: DMSession) -> None:
     """
     Core C2 Guaranteed Lead Accounting Engine:
-      1. Duplicate phone check (client is NEVER charged twice for same phone).
-      2. leads_used < leads_limit -> MAIN lead -> Main Sheet.
-         When hitting leads_limit & bonus_limit > 0 -> notify BONUS started!
-      3. leads_used < leads_limit + bonus_limit -> BONUS lead -> Main Sheet.
-         When hitting leads_limit + bonus_limit -> AUTO-STOP comment_active = False!
-      4. Already exhausted (late DM responder) -> RESERVE lead -> Private Reserve Sheet!
-         Notify client with 1-click buyout price (count * overage_price).
+    1. Duplicate phone check (client is NEVER charged twice for same phone).
+    2. leads_used < leads_limit -> MAIN lead -> Main Sheet.
+    3. leads_used < leads_limit + bonus_limit -> BONUS lead -> Main Sheet.
+    4. Already exhausted (late DM responder) -> RESERVE lead -> Private Reserve Sheet.
     """
     dup = await is_duplicate_phone(db, tenant.id, sess.temp_phone)
     if dup:
@@ -229,13 +213,13 @@ async def _record_completed_lead(db, tenant: Tenant, sess: DMSession) -> None:
             )
 
         badge = "🎁 BONUS LID" if is_bonus else "✅ YANGI LID"
+        extra_line = f"\n📝 Izoh/Miqdor: {sess.temp_qty}" if sess.temp_qty and sess.temp_qty != "-" else ""
         await _notify(
             tenant.tg_user_id,
             (
                 f"{badge} (#{tenant.leads_used}/{total_allowed})\n"
-                f"👤 Ism: {sess.temp_name}\n"
-                f"📞 Tel: {sess.temp_phone}\n"
-                f"📦 Miqdor/Izoh: {sess.temp_qty}\n"
+                f"📞 Tel: <b>{sess.temp_phone}</b>"
+                f"{extra_line}\n"
                 f"📱 IG: @{sess.customer_username or sess.customer_ig_id}"
             ),
             None,
@@ -247,7 +231,7 @@ async def _record_completed_lead(db, tenant: Tenant, sess: DMSession) -> None:
                 (
                     f"🎉 <b>Tabriklaymiz! {tenant.leads_limit} ta asosiy lid to'liq yig'ildi!</b>\n\n"
                     f"Hamkorligimiz uchun sizga kompaniyamiz nomidan <b>+{tenant.bonus_limit} ta BONUS lid</b> "
-                    f"sovg'a qilindi (jami {total_allowed} tagacha bepul davom etadi)!"
+                    f"taqdim etildi (jami {total_allowed} tagacha bonus davom etadi)!"
                 ),
                 None,
             )

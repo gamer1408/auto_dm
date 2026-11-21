@@ -12,11 +12,12 @@ from sqlalchemy import (
     UniqueConstraint,
     func,
     select,
+    text,
 )
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_async_engine
 from sqlalchemy.orm import declarative_base
 
-from config import settings, PLANS, SCRIPT_TEMPLATES
+from config import settings, PLANS, DEFAULT_SCRIPTS
 
 
 def _normalize_db_url(raw_url: str) -> str:
@@ -78,6 +79,9 @@ class Tenant(Base):
     # Auto-stop switch: automatically turns False when leads_used >= leads_limit + bonus_limit
     comment_active = Column(Boolean, default=True, nullable=False)
 
+    # CPL optional 2nd DM question toggle (False = Phone only, True = Phone + DM 2-xabar)
+    ask_qty_enabled = Column(Boolean, default=False, nullable=False)
+
     # Separate Google Sheets (Main = Viewer for client, Reserve = Private only for admin)
     main_sheet_id = Column(String(128), nullable=True)
     main_sheet_url = Column(Text, nullable=True)
@@ -85,13 +89,13 @@ class Tenant(Base):
     reserve_sheet_url = Column(Text, nullable=True)
 
     # Customizable Scripts
-    comment_reply_text = Column(Text, default=SCRIPT_TEMPLATES["shop"]["comment_reply"])
-    dm_welcome_text = Column(Text, default=SCRIPT_TEMPLATES["shop"]["dm_welcome"])
+    comment_reply_text = Column(Text, default=DEFAULT_SCRIPTS["CPL"]["comment_reply"])
+    dm_welcome_text = Column(Text, default=DEFAULT_SCRIPTS["CPL"]["dm_welcome"])
     dm_link_url = Column(Text, default="https://t.me/")
-    ask_name_text = Column(Text, default=SCRIPT_TEMPLATES["shop"]["ask_name"])
-    ask_phone_text = Column(Text, default=SCRIPT_TEMPLATES["shop"]["ask_phone"])
-    ask_qty_text = Column(Text, default=SCRIPT_TEMPLATES["shop"]["ask_qty"])
-    done_text = Column(Text, default=SCRIPT_TEMPLATES["shop"]["done"])
+    ask_name_text = Column(Text, default=DEFAULT_SCRIPTS["CPL"]["ask_name"])
+    ask_phone_text = Column(Text, default=DEFAULT_SCRIPTS["CPL"]["ask_phone"])
+    ask_qty_text = Column(Text, default=DEFAULT_SCRIPTS["CPL"]["ask_qty"])
+    done_text = Column(Text, default=DEFAULT_SCRIPTS["CPL"]["done"])
 
     created_at = Column(DateTime, default=utcnow)
     updated_at = Column(DateTime, default=utcnow, onupdate=utcnow)
@@ -113,7 +117,7 @@ class ReelsTarget(Base):
 
 
 class UsedTrial(Base):
-    """Anti-fraud lock: 1 IG Business Account can only ever claim Free Trial once."""
+    """Anti-fraud lock: 1 IG Business Account can only ever claim Bonus Trial once."""
     __tablename__ = "used_trials"
 
     id = Column(Integer, primary_key=True, autoincrement=True)
@@ -203,6 +207,17 @@ class PaymentRequest(Base):
 async def init_db() -> None:
     async with engine.begin() as conn:
         await conn.run_sync(Base.metadata.create_all)
+        try:
+            await conn.execute(
+                text("ALTER TABLE tenants ADD COLUMN IF NOT EXISTS ask_qty_enabled BOOLEAN DEFAULT FALSE NOT NULL")
+            )
+        except Exception:
+            try:
+                await conn.execute(
+                    text("ALTER TABLE tenants ADD COLUMN ask_qty_enabled BOOLEAN DEFAULT 0 NOT NULL")
+                )
+            except Exception:
+                pass
 
 
 async def get_tenant_by_tg(session: AsyncSession, tg_user_id: int) -> Optional[Tenant]:
@@ -252,10 +267,20 @@ async def is_duplicate_phone(session: AsyncSession, tenant_id: int, phone: str) 
 
 async def apply_plan_to_tenant(session: AsyncSession, tenant: Tenant, plan_code: str) -> None:
     spec = PLANS[plan_code]
+    old_mode = tenant.mode
     tenant.plan_code = spec.code
     tenant.mode = spec.mode
     tenant.queue_delay_sec = spec.queue_delay_sec
     tenant.comment_active = True
+
+    if old_mode != spec.mode:
+        defaults = DEFAULT_SCRIPTS[spec.mode]
+        tenant.comment_reply_text = defaults["comment_reply"]
+        tenant.dm_welcome_text = defaults["dm_welcome"]
+        tenant.ask_name_text = defaults["ask_name"]
+        tenant.ask_phone_text = defaults["ask_phone"]
+        tenant.ask_qty_text = defaults["ask_qty"]
+        tenant.done_text = defaults["done"]
 
     if spec.mode == "CPL":
         tenant.leads_limit = spec.leads_limit

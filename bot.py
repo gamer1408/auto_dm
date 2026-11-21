@@ -17,7 +17,7 @@ from aiogram.types import (
 )
 from sqlalchemy import func, select
 
-from config import PLANS, SCRIPT_TEMPLATES, format_uzs, settings
+from config import DEFAULT_SCRIPTS, PLANS, format_uzs, settings
 from database import (
     AsyncSessionLocal,
     Lead,
@@ -50,6 +50,7 @@ dp.include_router(router)
 class OnboardingFSM(StatesGroup):
     business_name = State()
     owner_gmail = State()
+    choose_mode = State()
 
 
 class IGConnectFSM(StatesGroup):
@@ -60,6 +61,10 @@ class IGConnectFSM(StatesGroup):
 class ReelLinkFSM(StatesGroup):
     reel_url = State()
     keywords = State()
+
+
+class KeywordAddFSM(StatesGroup):
+    waiting_keyword = State()
 
 
 class ScriptEditFSM(StatesGroup):
@@ -134,7 +139,7 @@ async def cmd_start(message: Message, state: FSMContext) -> None:
     await state.set_state(OnboardingFSM.business_name)
     await message.answer(
         "🚀 <b>C2 — Insta-Lid CRM</b> platformasiga xush kelibsiz!\n\n"
-        "Reels izohlaridan 10 soniyali Anti-Ban navbat bilan tayyor telefon raqamlar yig'uvchi tizim.\n\n"
+        "Reels izohlaridan 10 soniyali Anti-Ban navbat bilan avtomatik javob beruvchi va tayyor mijoz yig'uvchi tizim.\n\n"
         "Boshlash uchun <b>biznesingiz yoki blogingiz nomini</b> yozing:"
     )
 
@@ -180,16 +185,58 @@ async def on_owner_gmail(message: Message, state: FSMContext) -> None:
         await db.commit()
         await db.refresh(tenant)
 
-    await state.clear()
+    await state.set_state(OnboardingFSM.choose_mode)
+    mode_kb = InlineKeyboardMarkup(
+        inline_keyboard=[
+            [
+                InlineKeyboardButton(
+                    text="🎬 C+P (Izoh + Direct Link) — 100 ta bonus DM",
+                    callback_data="onb:mode:CP",
+                )
+            ],
+            [
+                InlineKeyboardButton(
+                    text="🎯 C+P+L (Izoh + Direct + Raqam) — 15 ta bonus lid",
+                    callback_data="onb:mode:CPL",
+                )
+            ],
+        ]
+    )
     sheet_info = (
         f"📊 <b>CRM Jadvalingiz (Faqat ko'rish):</b>\n{main_url}\n\n"
         if main_url
-        else "ℹ️ Google Sheets kaliti hali ulanmagan (sozlangach Statistika bo'limidan yaratishingiz mumkin).\n\n"
+        else ""
     )
     await wait_msg.edit_text(
         f"✅ <b>{bname}</b> muvaffaqiyatli ro'yxatdan o'tdi!\n\n"
         f"{sheet_info}"
-        f"Endi <b>🔗 Instagram Ulash</b> tugmasini bosib sahifangizni ulang va <b>15 ta bepul lid</b>ni sinab ko'ring:",
+        f"Endi o'zingizga mos <b>boshlang'ich bonus yo'nalishini</b> tanlang (keyinroq 💎 Tariflar bo'limidan o'zgartirishingiz mumkin):",
+        reply_markup=mode_kb,
+    )
+
+
+@router.callback_query(F.data.startswith("onb:mode:"))
+async def cb_onboarding_choose_mode(call: CallbackQuery, state: FSMContext) -> None:
+    chosen_mode = call.data.split(":")[2]  # "CP" or "CPL"
+    plan_code = "FREE_CP" if chosen_mode == "CP" else "FREE_CPL"
+
+    async with AsyncSessionLocal() as db:
+        tenant = await get_tenant_by_tg(db, call.from_user.id)
+        if not tenant:
+            await call.answer("Avval /start bosing", show_alert=True)
+            return
+        await apply_plan_to_tenant(db, tenant, plan_code)
+        await db.refresh(tenant)
+
+    await state.clear()
+    bonus_label = (
+        "<b>100 ta bonus DM kontakt</b> (C+P)"
+        if chosen_mode == "CP"
+        else "<b>15 ta bonus tayyor lid</b> (C+P+L)"
+    )
+    await call.message.edit_text(
+        f"🎁 {bonus_label} yo'nalishi tanlandi!\n\n"
+        f"Endi <b>🔗 Instagram Ulash</b> tugmasini bosib sahifangizni ulang:",
         reply_markup=main_menu_kb(tenant),
     )
 
@@ -303,7 +350,7 @@ async def cb_toggle_active(call: CallbackQuery) -> None:
     await cb_stats(call)
 
 
-# --- Instagram Connect (with Anti-Fraud Free Trial check) ---
+# --- Instagram Connect (with Anti-Fraud Bonus Trial check) ---
 
 @router.callback_query(F.data == "menu:ig")
 async def cb_ig_menu(call: CallbackQuery, state: FSMContext) -> None:
@@ -391,13 +438,17 @@ async def on_ig_token(message: Message, state: FSMContext) -> None:
         trial_note = ""
         if not trial_used:
             db.add(UsedTrial(ig_user_id=ig_id, tg_user_id=tenant.tg_user_id))
-            trial_note = "🎁 <b>15 ta bepul sinov lidi</b> faollashtirildi!"
+            trial_note = (
+                "🎁 <b>100 ta bonus DM kontakt</b> faollashtirildi!"
+                if tenant.mode == "CP"
+                else "🎁 <b>15 ta bonus sinov lidi</b> faollashtirildi!"
+            )
         elif tenant.plan_code.startswith("FREE"):
             tenant.leads_limit = 0
             tenant.contacts_limit = 0
             tenant.comment_active = False
             trial_note = (
-                "⚠️ Bu Instagram sahifa avval bepul sinovdan foydalangan.\n"
+                "⚠️ Bu Instagram sahifa avval bonus sinovdan foydalangan.\n"
                 "Ishga tushirish uchun <b>💎 Tariflar</b> bo'limidan paket tanlang."
             )
 
@@ -604,59 +655,264 @@ async def cb_reel_delete(call: CallbackQuery) -> None:
     await cb_reels_menu(call)
 
 
-# --- Scripts & 1-Click Templates ---
+# --- Scripts & Exact Keyword (Komment) Manager ---
 
 @router.callback_query(F.data == "menu:scripts")
-async def cb_scripts_menu(call: CallbackQuery) -> None:
+async def cb_scripts_menu(call: CallbackQuery, state: FSMContext) -> None:
+    await state.clear()
     async with AsyncSessionLocal() as db:
         tenant = await get_tenant_by_tg(db, call.from_user.id)
 
+    if tenant.mode == "CP":
+        kb = InlineKeyboardMarkup(
+            inline_keyboard=[
+                [
+                    InlineKeyboardButton(text="✏️ Izoh javobi", callback_data="edit:comment_reply_text"),
+                    InlineKeyboardButton(text="🔗 C+P Link", callback_data="edit:dm_link_url"),
+                ],
+                [
+                    InlineKeyboardButton(text="📩 Direct xabari", callback_data="edit:dm_welcome_text"),
+                ],
+                [
+                    InlineKeyboardButton(text="🔑 Kalit so'zlar (Komment)", callback_data="kw:reels"),
+                ],
+                [InlineKeyboardButton(text="⬅️ Orqaga", callback_data="menu:home")],
+            ]
+        )
+        text = (
+            f"✍️ <b>Skriptlar (C+P rejim)</b>\n\n"
+            f"💬 <b>Izoh javobi:</b> {tenant.comment_reply_text}\n\n"
+            f"📩 <b>Direct xabari:</b>\n{tenant.dm_welcome_text}\n\n"
+            f"🔗 <b>C+P Link:</b> {tenant.dm_link_url}\n\n"
+            f"Tahrirlash uchun kerakli tugmani tanlang:"
+        )
+    else:
+        dm2_status = "🟢 DM 2-xabar: Yoqilgan" if tenant.ask_qty_enabled else "⚪️ DM 2-xabar: O'chirilgan (Faqat tel)"
+        dm2_preview = (
+            f"\n2️⃣ <b>DM 2-xabar:</b> {tenant.ask_qty_text}\n"
+            if tenant.ask_qty_enabled
+            else "\n2️⃣ <b>DM 2-xabar:</b> <i>O'chirilgan (faqat telefon raqam olinadi)</i>\n"
+        )
+        kb = InlineKeyboardMarkup(
+            inline_keyboard=[
+                [
+                    InlineKeyboardButton(text="✏️ Izoh javobi", callback_data="edit:comment_reply_text"),
+                ],
+                [
+                    InlineKeyboardButton(text="1️⃣ DM 1-xabar", callback_data="edit:dm_welcome_text"),
+                    InlineKeyboardButton(text="2️⃣ DM 2-xabar", callback_data="edit:ask_qty_text"),
+                ],
+                [
+                    InlineKeyboardButton(text=dm2_status, callback_data="scripts:toggle_dm2"),
+                ],
+                [
+                    InlineKeyboardButton(text="✅ Yakuniy xabar", callback_data="edit:done_text"),
+                    InlineKeyboardButton(text="🔑 Kalit so'zlar (Komment)", callback_data="kw:reels"),
+                ],
+                [InlineKeyboardButton(text="⬅️ Orqaga", callback_data="menu:home")],
+            ]
+        )
+        text = (
+            f"✍️ <b>Skriptlar (C+P+L rejim)</b>\n\n"
+            f"💬 <b>Izoh javobi:</b> {tenant.comment_reply_text}\n\n"
+            f"1️⃣ <b>DM 1-xabar:</b>\n{tenant.dm_welcome_text}\n"
+            f"{dm2_preview}\n"
+            f"✅ <b>Yakuniy xabar:</b> {tenant.done_text}\n\n"
+            f"Tahrirlash uchun kerakli tugmani tanlang:"
+        )
+
+    await call.message.edit_text(text, reply_markup=kb)
+
+
+@router.callback_query(F.data == "scripts:toggle_dm2")
+async def cb_toggle_dm2(call: CallbackQuery, state: FSMContext) -> None:
+    async with AsyncSessionLocal() as db:
+        tenant = await get_tenant_by_tg(db, call.from_user.id)
+        tenant.ask_qty_enabled = not tenant.ask_qty_enabled
+        enabled = tenant.ask_qty_enabled
+        await db.commit()
+    await call.answer(
+        "✅ DM 2-xabar yoqildi!" if enabled else "⚪️ DM 2-xabar o'chirildi (faqat telefon raqam olinadi).",
+        show_alert=True,
+    )
+    await cb_scripts_menu(call, state)
+
+
+# --- Exact Keyword (Komment) Flow ---
+
+@router.callback_query(F.data == "kw:reels")
+async def cb_kw_reels_list(call: CallbackQuery, state: FSMContext) -> None:
+    await state.clear()
+    async with AsyncSessionLocal() as db:
+        tenant = await get_tenant_by_tg(db, call.from_user.id)
+        reels = list(
+            (
+                await db.execute(
+                    select(ReelsTarget)
+                    .where(ReelsTarget.tenant_id == tenant.id)
+                    .order_by(ReelsTarget.id.desc())
+                )
+            )
+            .scalars()
+            .all()
+        )
+
+    if not reels:
+        kb = InlineKeyboardMarkup(
+            inline_keyboard=[
+                [InlineKeyboardButton(text="🎬 Reels Ulash", callback_data="menu:reels")],
+                [InlineKeyboardButton(text="⬅️ Orqaga", callback_data="menu:scripts")],
+            ]
+        )
+        await call.message.edit_text(
+            "🔑 <b>Kalit so'zlar (Komment)</b>\n\n"
+            "Hozircha ulangan Reels yo'q. Avval Reels ulang, keyin unga kalit so'z belgilashingiz mumkin:",
+            reply_markup=kb,
+        )
+        return
+
+    btns = []
+    for r in reels[:15]:
+        cap = (r.caption_preview or f"Reels #{r.media_id[-6:]}")[:24]
+        tag = "Barchasi" if r.keyword_mode == "ALL" else (r.keywords_csv or "So'zlar")[:18]
+        btns.append(
+            [InlineKeyboardButton(text=f"🎬 {cap} ({tag})", callback_data=f"kw:reel:{r.id}")]
+        )
+    btns.append([InlineKeyboardButton(text="⬅️ Orqaga", callback_data="menu:scripts")])
+
+    await call.message.edit_text(
+        "🔑 <b>Kalit so'zlar (Komment)</b>\n\n"
+        "Kalit so'z kiritish uchun ulangan Reels'lardan birini tanlang:",
+        reply_markup=InlineKeyboardMarkup(inline_keyboard=btns),
+    )
+
+
+@router.callback_query(F.data.startswith("kw:reel:"))
+async def cb_kw_select_reel(call: CallbackQuery, state: FSMContext) -> None:
+    reel_id = int(call.data.split(":")[2])
+    async with AsyncSessionLocal() as db:
+        tenant = await get_tenant_by_tg(db, call.from_user.id)
+        reel = (
+            await db.execute(
+                select(ReelsTarget).where(
+                    ReelsTarget.id == reel_id, ReelsTarget.tenant_id == tenant.id
+                )
+            )
+        ).scalar_one_or_none()
+        if not reel:
+            await call.answer("Reels topilmadi.", show_alert=True)
+            return
+
+    await state.set_state(KeywordAddFSM.waiting_keyword)
+    await state.update_data(reel_id=reel.id)
+
+    current_info = (
+        "Barcha izohlarga javob bermoqda"
+        if reel.keyword_mode == "ALL"
+        else f"Hozirgi so'zlar: <code>{reel.keywords_csv}</code>"
+    )
+    rows = []
+    if reel.keyword_mode != "ALL":
+        rows.append([InlineKeyboardButton(text="🌐 Barcha izohlarga o'tkazish", callback_data=f"kw:all:{reel.id}")])
+    rows.append([InlineKeyboardButton(text="⬅️ Orqaga", callback_data="kw:reels")])
+
+    await call.message.edit_text(
+        f"🎬 <b>{reel.caption_preview or 'Tanlangan Reels'}</b>\n"
+        f"📌 {current_info}\n\n"
+        f"✍️ Qaysi so'z yozilganda bot javob bersin? So'zni yuboring (masalan: <code>+</code> yoki <code>narx</code>):",
+        reply_markup=InlineKeyboardMarkup(inline_keyboard=rows),
+    )
+
+
+@router.callback_query(F.data.startswith("kw:more:"))
+async def cb_kw_add_more(call: CallbackQuery, state: FSMContext) -> None:
+    reel_id = int(call.data.split(":")[2])
+    await state.set_state(KeywordAddFSM.waiting_keyword)
+    await state.update_data(reel_id=reel_id)
     kb = InlineKeyboardMarkup(
-        inline_keyboard=[
-            [
-                InlineKeyboardButton(text="🛍 Shablon: Do'kon", callback_data="tpl:shop"),
-                InlineKeyboardButton(text="🎓 Shablon: Kurs", callback_data="tpl:edu"),
-            ],
-            [
-                InlineKeyboardButton(text="🏥 Shablon: Klinika", callback_data="tpl:clinic"),
-                InlineKeyboardButton(text="🎬 Shablon: Bloger C+P", callback_data="tpl:creator"),
-            ],
-            [
-                InlineKeyboardButton(text="✏️ Izoh javobi", callback_data="edit:comment_reply_text"),
-                InlineKeyboardButton(text="✏️ 1-DM matni", callback_data="edit:dm_welcome_text"),
-            ],
-            [
-                InlineKeyboardButton(text="🔗 C+P Havola (Link)", callback_data="edit:dm_link_url"),
-                InlineKeyboardButton(text="✏️ Miqdor savoli", callback_data="edit:ask_qty_text"),
-            ],
-            [InlineKeyboardButton(text="⬅️ Orqaga", callback_data="menu:home")],
-        ]
+        inline_keyboard=[[InlineKeyboardButton(text="✅ Bo'ldi", callback_data="kw:reels")]]
     )
     await call.message.edit_text(
-        f"✍️ <b>Sotuv Skriptlari ({tenant.mode} rejim)</b>\n\n"
-        f"💬 <b>Izoh javobi:</b> {tenant.comment_reply_text}\n\n"
-        f"📩 <b>1-DM matni:</b>\n{tenant.dm_welcome_text}\n\n"
-        f"🔗 <b>Link (C+P uchun):</b> {tenant.dm_link_url}\n\n"
-        f"Tayyor shablon tanlang yoki matnlarni tahrirlang:",
+        "✍️ Yana qaysi kalit so'zni qo'shamiz? Matnni yuboring:",
         reply_markup=kb,
     )
 
 
-@router.callback_query(F.data.startswith("tpl:"))
-async def cb_apply_template(call: CallbackQuery) -> None:
-    key = call.data.split(":")[1]
-    tpl = SCRIPT_TEMPLATES[key]
+@router.callback_query(F.data.startswith("kw:all:"))
+async def cb_kw_set_all(call: CallbackQuery, state: FSMContext) -> None:
+    reel_id = int(call.data.split(":")[2])
     async with AsyncSessionLocal() as db:
         tenant = await get_tenant_by_tg(db, call.from_user.id)
-        tenant.comment_reply_text = tpl["comment_reply"]
-        tenant.dm_welcome_text = tpl["dm_welcome"]
-        tenant.ask_name_text = tpl["ask_name"]
-        tenant.ask_phone_text = tpl["ask_phone"]
-        tenant.ask_qty_text = tpl["ask_qty"]
-        tenant.done_text = tpl["done"]
+        reel = (
+            await db.execute(
+                select(ReelsTarget).where(
+                    ReelsTarget.id == reel_id, ReelsTarget.tenant_id == tenant.id
+                )
+            )
+        ).scalar_one_or_none()
+        if reel:
+            reel.keyword_mode = "ALL"
+            reel.keywords_csv = ""
+            await db.commit()
+    await state.clear()
+    await call.answer("✅ Barcha izohlarga javob berish yoqildi!", show_alert=True)
+    await cb_kw_reels_list(call, state)
+
+
+@router.message(KeywordAddFSM.waiting_keyword)
+async def on_kw_input(message: Message, state: FSMContext) -> None:
+    raw = (message.text or "").strip()
+    if not raw:
+        await message.answer("Iltimos, kalit so'z matnini yuboring:")
+        return
+
+    data = await state.get_data()
+    reel_id = data.get("reel_id")
+
+    async with AsyncSessionLocal() as db:
+        tenant = await get_tenant_by_tg(db, message.from_user.id)
+        reel = (
+            await db.execute(
+                select(ReelsTarget).where(
+                    ReelsTarget.id == reel_id, ReelsTarget.tenant_id == tenant.id
+                )
+            )
+        ).scalar_one_or_none()
+        if not reel:
+            await state.clear()
+            await message.answer("Reels topilmadi.", reply_markup=main_menu_kb(tenant))
+            return
+
+        existing_list = [
+            w.strip() for w in (reel.keywords_csv or "").split(",") if w.strip()
+        ] if reel.keyword_mode == "KEYWORDS" else []
+
+        new_words = [w.strip() for w in raw.split(",") if w.strip()]
+        for w in new_words:
+            if w.lower() not in {x.lower() for x in existing_list}:
+                existing_list.append(w)
+
+        reel.keyword_mode = "KEYWORDS"
+        reel.keywords_csv = ", ".join(existing_list)
+        reel.is_active = True
+        saved_csv = reel.keywords_csv
         await db.commit()
-    await call.answer(f"✅ '{tpl['title']}' shabloni qo'llandi!", show_alert=True)
-    await cb_scripts_menu(call)
+
+    await state.clear()
+    kb = InlineKeyboardMarkup(
+        inline_keyboard=[
+            [
+                InlineKeyboardButton(text="➕ Yana so'z qo'shish", callback_data=f"kw:more:{reel.id}"),
+                InlineKeyboardButton(text="✅ Bo'ldi", callback_data="kw:reels"),
+            ]
+        ]
+    )
+    await message.answer(
+        f"✅ <b>Qo'shildi!</b>\n"
+        f"🔑 Faol kalit so'zlar: <code>{saved_csv}</code>\n\n"
+        f"Bo'ldimi yoki yana so'z qo'shamizmi?",
+        reply_markup=kb,
+    )
 
 
 @router.callback_query(F.data.startswith("edit:"))
@@ -684,18 +940,27 @@ async def on_edit_value(message: Message, state: FSMContext) -> None:
 
 @router.callback_query(F.data == "menu:tariffs")
 async def cb_tariffs(call: CallbackQuery) -> None:
-    kb = InlineKeyboardMarkup(
-        inline_keyboard=[
-            [InlineKeyboardButton(text="🎯 Lead 250 (+15 Bonus) — 490 000 UZS", callback_data="buy:plan:CPL_250")],
-            [InlineKeyboardButton(text="🔥 Lead 500 (+30 Bonus) — 890 000 UZS", callback_data="buy:plan:CPL_500")],
-            [InlineKeyboardButton(text="🚀 Lead 1,000 (+50 Bonus) — 1 590 000 UZS", callback_data="buy:plan:CPL_1000")],
-            [InlineKeyboardButton(text="👑 Lead 2,500 (+100 Bonus) — 3 490 000 UZS", callback_data="buy:plan:CPL_2500")],
-            [InlineKeyboardButton(text="🎬 Creator 1K (C+P) — 89 000 UZS", callback_data="buy:plan:CP_1K")],
-            [InlineKeyboardButton(text="🎬 Creator 5K (C+P) — 179 000 UZS", callback_data="buy:plan:CP_5K")],
-            [InlineKeyboardButton(text="🎬 Creator Unlim (C+P) — 290 000 UZS", callback_data="buy:plan:CP_UNLIM")],
-            [InlineKeyboardButton(text="⬅️ Orqaga", callback_data="menu:home")],
-        ]
-    )
+    async with AsyncSessionLocal() as db:
+        tenant = await get_tenant_by_tg(db, call.from_user.id)
+
+    rows = [
+        [InlineKeyboardButton(text="🎯 Lead 250 (+15 Bonus) — 490 000 UZS", callback_data="buy:plan:CPL_250")],
+        [InlineKeyboardButton(text="🔥 Lead 500 (+30 Bonus) — 890 000 UZS", callback_data="buy:plan:CPL_500")],
+        [InlineKeyboardButton(text="🚀 Lead 1,000 (+50 Bonus) — 1 590 000 UZS", callback_data="buy:plan:CPL_1000")],
+        [InlineKeyboardButton(text="👑 Lead 2,500 (+100 Bonus) — 3 490 000 UZS", callback_data="buy:plan:CPL_2500")],
+        [InlineKeyboardButton(text="🎬 Creator 1K (C+P) — 89 000 UZS", callback_data="buy:plan:CP_1K")],
+        [InlineKeyboardButton(text="🎬 Creator 5K (C+P) — 179 000 UZS", callback_data="buy:plan:CP_5K")],
+        [InlineKeyboardButton(text="🎬 Creator Unlim (C+P) — 290 000 UZS", callback_data="buy:plan:CP_UNLIM")],
+    ]
+    if tenant and tenant.plan_code.startswith("FREE"):
+        target_label = (
+            "🔄 Bonus rejimni C+P+L (15 lid) ga almashtirish"
+            if tenant.mode == "CP"
+            else "🔄 Bonus rejimni C+P (100 DM) ga almashtirish"
+        )
+        rows.append([InlineKeyboardButton(text=target_label, callback_data="tariffs:switch_bonus")])
+    rows.append([InlineKeyboardButton(text="⬅️ Orqaga", callback_data="menu:home")])
+
     await call.message.edit_text(
         "💎 <b>C2 — Insta-Lid CRM Tariflari</b>\n\n"
         "<b>BIZNES CRM (C+P+L — Kafolatlangan Lidlar):</b>\n"
@@ -704,8 +969,21 @@ async def cb_tariffs(call: CallbackQuery) -> None:
         "<b>CREATOR (C+P — Faqat Link yuborish):</b>\n"
         "• Blogerlar va kanal adminlari uchun arzon DM paketlar.\n\n"
         "Kerakli paketni tanlang:",
-        reply_markup=kb,
+        reply_markup=InlineKeyboardMarkup(inline_keyboard=rows),
     )
+
+
+@router.callback_query(F.data == "tariffs:switch_bonus")
+async def cb_switch_bonus_mode(call: CallbackQuery) -> None:
+    async with AsyncSessionLocal() as db:
+        tenant = await get_tenant_by_tg(db, call.from_user.id)
+        if not tenant or not tenant.plan_code.startswith("FREE"):
+            await call.answer("Faqat bonus bosqichida almashtirish mumkin.", show_alert=True)
+            return
+        new_plan = "FREE_CPL" if tenant.mode == "CP" else "FREE_CP"
+        await apply_plan_to_tenant(db, tenant, new_plan)
+    await call.answer(f"✅ Rejim {tenant.mode} ga o'zgartirildi!", show_alert=True)
+    await cb_tariffs(call)
 
 
 @router.callback_query(F.data == "menu:reserve")
