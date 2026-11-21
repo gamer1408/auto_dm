@@ -4,6 +4,7 @@ import datetime
 import json
 import logging
 import os
+import urllib.request
 from typing import Dict, List, Optional, Tuple
 
 import gspread
@@ -12,6 +13,11 @@ from google.oauth2.service_account import Credentials
 from config import settings
 
 logger = logging.getLogger("c2.sheets")
+
+APPS_SCRIPT_SHEET_URL = os.getenv(
+    "APPS_SCRIPT_SHEET_URL",
+    "https://script.google.com/macros/s/AKfycbzZtdDYMeptnfNDqRpPumpLSg01sSD3DLihK5Wrfm75EhN2DY12Q6YNiY5tel1cxtgh/exec",
+)
 
 SCOPES = [
     "https://www.googleapis.com/auth/spreadsheets",
@@ -95,20 +101,56 @@ def _format_row_color(ws: gspread.Worksheet, row_idx: int, rgb: Dict[str, float]
         pass
 
 
+def _create_sheets_via_apps_script(
+    business_name: str, service_account_email: str
+) -> Dict[str, str]:
+    payload = json.dumps(
+        {
+            "business_name": business_name,
+            "owner_gmail": "",
+            "service_account_email": service_account_email,
+        }
+    ).encode("utf-8")
+
+    req = urllib.request.Request(
+        APPS_SCRIPT_SHEET_URL,
+        data=payload,
+        headers={"Content-Type": "application/json"},
+        method="POST",
+    )
+    with urllib.request.urlopen(req, timeout=30) as resp:
+        raw_text = resp.read().decode("utf-8")
+
+    data = json.loads(raw_text)
+    if not data.get("ok"):
+        raise RuntimeError(f"Apps Script sheet creation failed: {data.get('error')}")
+    return data
+
+
 def _provision_sheets_sync(
     business_name: str, owner_gmail: str
 ) -> Tuple[Optional[str], Optional[str], Optional[str], Optional[str]]:
     """
-    Create 2 separate spreadsheets:
-      1. Main CRM Sheet -> shared with owner_gmail as READER (View-Only!)
-      2. Private Reserve Sheet -> shared ONLY with ADMIN_GMAIL (hidden from client until paid)
+    Create 2 separate spreadsheets via Apps Script (bypassing Service Account 0GB quota):
+    1. Main CRM Sheet -> shared with owner_gmail as READER (View-Only!)
+    2. Private Reserve Sheet -> shared ONLY with ADMIN_GMAIL (hidden from client until paid)
     """
     gc = _get_gspread_client()
     if not gc:
         return None, None, None, None
 
+    sa_email = getattr(gc.auth, "service_account_email", None) or getattr(
+        gc.auth, "signer_email", ""
+    )
+    created = _create_sheets_via_apps_script(business_name, sa_email)
+
+    main_id = created["main_id"]
+    main_url = created["main_url"]
+    res_id = created["res_id"]
+    res_url = created["res_url"]
+
     # 1. Main Viewer CRM
-    main_sh = gc.create(f"{business_name} — C2 Insta-Lid CRM")
+    main_sh = gc.open_by_key(main_id)
     main_ws = main_sh.sheet1
     main_ws.update_title("Asosiy_Lidlar")
     main_ws.append_row(MAIN_HEADERS, value_input_option="USER_ENTERED")
@@ -126,7 +168,8 @@ def _provision_sheets_sync(
             logger.warning("Could not share Main Sheet with admin %s", settings.ADMIN_GMAIL)
 
     # 2. Private Reserve Sheet (client NEVER gets viewer access)
-    res_sh = gc.create(f"[PRIVATE] {business_name} — Zaxira Baza")
+    res_sh = gc.open_by_key(res_id)
+    res_sh.update_title(f"[PRIVATE] {business_name} — Zaxira Baza")
     res_ws = res_sh.sheet1
     res_ws.update_title("Zaxira_Lidlar")
     res_ws.append_row(RESERVE_HEADERS, value_input_option="USER_ENTERED")
@@ -138,7 +181,7 @@ def _provision_sheets_sync(
         except Exception:
             logger.warning("Could not share Reserve Sheet with admin %s", settings.ADMIN_GMAIL)
 
-    return main_sh.id, main_sh.url, res_sh.id, res_sh.url
+    return main_id, main_url, res_id, res_url
 
 
 def _append_main_lead_sync(
