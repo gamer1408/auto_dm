@@ -140,8 +140,8 @@ def get_connect_guide_pdf() -> InputFile:
     ops.append(_rect(42, 145, 8, 182, (0.86, 0.15, 0.15)))
     ops.append(_text(62, 304, 11.5, "URGENT / MUHIM: TAKLIF YUBORGANDAN SO'NG ADMINGA YOZING!", bold=True, rgb=(0.72, 0.11, 0.11)))
     ops.append(_text(62, 284, 10, "Taklif yuborilganidan so'ng admin: @Yahyobek_U ga xabar yozishingiz shart.", bold=True, rgb=(0.50, 0.11, 0.11)))
-    ops.append(_text(62, 267, 9.6, "Pastdagi tugmani bossangiz Telegram'da @Yahyobek_U oynasi tayyor shablon", rgb=(0.25, 0.10, 0.10)))
-    ops.append(_text(62, 253, 9.6, "matni bilan avtomatik ochiladi - siz faqat JONATISH (Send) tugmasini bosing:", rgb=(0.25, 0.10, 0.10)))
+    ops.append(_text(62, 267, 9.6, "Pastdagi tugmani bossangiz @Yahyobek_U oynasi tayyor shablon bilan ochiladi:", rgb=(0.25, 0.10, 0.10)))
+    ops.append(_text(62, 253, 9.6, "Matn oxiridagi @ belgisidan keyin IG sahifangizni yozib JONATISH ni bosing!", rgb=(0.72, 0.11, 0.11)))
 
     # Clickable Red CTA Button
     ops.append(_rect(62, 214, 330, 28, (0.86, 0.15, 0.15)))
@@ -158,7 +158,7 @@ def get_connect_guide_pdf() -> InputFile:
     tg_url = (
         "https://t.me/Yahyobek_U?text=Assalomu%20alaykum!%20Reels2Lead%20CRM%20uchun%20"
         "Facebook%20sahifamga%20adminlik%20taklifini%20yubordim.%20Menga%20IG%20Business%20ID%20"
-        "va%20Long-Lived%20Tokenni%20tayyorlab%20berasizmi%3F"
+        "Instagram%20sahifam%3A%20%40"
     )
     pdf_bytes = _build_single_page_pdf(ops, uri_link=(62, 214, 392, 242, tg_url))
     return BufferedInputFile(pdf_bytes, filename="Reels2Lead_Akkaunt_Ulash_Yoriqnomasi.pdf")
