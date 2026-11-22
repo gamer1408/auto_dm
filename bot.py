@@ -729,11 +729,13 @@ async def cb_scripts_menu(call: CallbackQuery, state: FSMContext) -> None:
                 [InlineKeyboardButton(text="⬅️ Orqaga", callback_data="menu:home")],
             ]
         )
+        clean_dm = (tenant.dm_welcome_text or "").replace("{link}", "").strip()
         text = (
             f"✍️ <b>Skriptlar (C+P rejim)</b>\n\n"
             f"💬 <b>Izoh javobi:</b> {tenant.comment_reply_text}\n\n"
-            f"📩 <b>Direct xabari:</b>\n{tenant.dm_welcome_text}\n\n"
-            f"🔗 <b>C+P Link:</b> {tenant.dm_link_url}\n\n"
+            f"📩 <b>Direct xabari:</b>\n{clean_dm}\n\n"
+            f"🔗 <b>C+P Link:</b> {tenant.dm_link_url}\n"
+            f"<i>(Havola avtomatik ravishda Direct xabari oxiriga qo'shiladi)</i>\n\n"
             f"Tahrirlash uchun kerakli tugmani tanlang:"
         )
     else:

@@ -287,3 +287,12 @@ async def _record_completed_lead(db, tenant: Tenant, sess: DMSession) -> None:
             ),
             "buy_reserve",
         )
+
+def _compose_cp_dm_text(welcome_text: str, link_url: str) -> str:
+    base = (welcome_text or "").strip()
+    link = (link_url or "").strip()
+    if "{link}" in base:
+        return base.replace("{link}", link).strip()
+    if link and link not in base:
+        return f"{base}\n\n{link}".strip() if base else link
+    return base

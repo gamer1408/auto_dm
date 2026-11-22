@@ -191,9 +191,8 @@ DEFAULT_SCRIPTS: Dict[str, Dict[str, str]] = {
     "CP": {
         "comment_reply": "Direct'ingizga yubordim, tekshirib ko'ring! ✨",
         "dm_welcome": (
-            "Salom! 👋 Siz uchun ajoyib yechim topib qo'ydim.\n\n"
-            "Hoziroq qo'shilib oling va o'z bonuslaringizni qo'lga kiriting 🎁👇\n"
-            "{link}"
+            "Salom! 👋 Siz uchun foydali materialni tayyorlab qo'ydim.\n\n"
+            "Hoziroq quyidagi havola orqali o'tib oling 👇"
         ),
         "ask_name": "Ismingizni yozing:",
         "ask_phone": "Telefon raqamingizni yozing (+998...):",
