@@ -17,11 +17,12 @@ from aiogram.types import (
 )
 from sqlalchemy import func, select
 
-from config import DEFAULT_SCRIPTS, PLANS, format_uzs, settings
+from config import PLANS, format_uzs, settings
 from database import (
     AsyncSessionLocal,
     Lead,
     PaymentRequest,
+    PromoCode,
     ReelsTarget,
     Tenant,
     UsedTrial,
@@ -30,9 +31,11 @@ from database import (
     get_pending_reserve_leads,
     get_tenant_by_id,
     get_tenant_by_tg,
+    utcnow,
 )
 from funnel_engine import set_notify_callback
 from instagram_api import ig_api
+from pdf_docs import get_connect_guide_pdf, get_user_guide_pdf
 from queue_worker import queue_manager
 from sheets_manager import provision_tenant_sheets, transfer_reserve_to_main
 
@@ -80,6 +83,7 @@ def main_menu_kb(tenant: Tenant) -> InlineKeyboardMarkup:
     status_emoji = "🟢" if tenant.comment_active else "🔴"
     return InlineKeyboardMarkup(
         inline_keyboard=[
+            [InlineKeyboardButton(text="📘 Akkaunt Ulash Yo'riqnomasi", callback_data="menu:connect_guide")],
             [InlineKeyboardButton(text=ig_label, callback_data="menu:ig")],
             [
                 InlineKeyboardButton(text="🎬 Reels Ulash", callback_data="menu:reels"),
@@ -94,6 +98,7 @@ def main_menu_kb(tenant: Tenant) -> InlineKeyboardMarkup:
                     text=f"{status_emoji} Holat / Statistika", callback_data="menu:stats"
                 ),
             ],
+            [InlineKeyboardButton(text="📖 Qo'llanma", callback_data="menu:guide")],
         ]
     )
 
@@ -131,14 +136,14 @@ async def cmd_start(message: Message, state: FSMContext) -> None:
         if tenant:
             await message.answer(
                 f"👋 Xush kelibsiz, <b>{tenant.business_name}</b>!\n"
-                f"C2 — Insta-Lid CRM boshqaruv paneli:",
+                f"Reels2Lead CRM boshqaruv paneli:",
                 reply_markup=main_menu_kb(tenant),
             )
             return
 
     await state.set_state(OnboardingFSM.business_name)
     await message.answer(
-        "🚀 <b>C2 — Insta-Lid CRM</b> platformasiga xush kelibsiz!\n\n"
+        "🚀 <b>Reels2Lead CRM</b> platformasiga xush kelibsiz!\n\n"
         "Reels izohlaridan 10 soniyali Anti-Ban navbat bilan avtomatik javob beruvchi va tayyor mijoz yig'uvchi tizim.\n\n"
         "Boshlash uchun <b>biznesingiz yoki blogingiz nomini</b> yozing:"
     )
@@ -236,9 +241,54 @@ async def cb_onboarding_choose_mode(call: CallbackQuery, state: FSMContext) -> N
     )
     await call.message.edit_text(
         f"🎁 {bonus_label} yo'nalishi tanlandi!\n\n"
-        f"Endi <b>🔗 Instagram Ulash</b> tugmasini bosib sahifangizni ulang:",
+        f"Boshlash uchun avval <b>📘 Akkaunt Ulash Yo'riqnomasi</b> PDF faylini ochib ko'ring, so'ng <b>🔗 Instagram Ulash</b> tugmasini bosing:",
         reply_markup=main_menu_kb(tenant),
     )
+
+
+# --- PDF Guide Handlers ---
+
+@router.callback_query(F.data == "menu:connect_guide")
+async def cb_connect_guide(call: CallbackQuery, state: FSMContext) -> None:
+    await state.clear()
+    await call.answer("📘 Akkaunt ulash yo'riqnomasi yuborilmoqda...")
+    async with AsyncSessionLocal() as db:
+        tenant = await get_tenant_by_tg(db, call.from_user.id)
+
+    pdf_file = get_connect_guide_pdf()
+    await call.message.answer_document(
+        document=pdf_file,
+        caption=(
+            "📘 <b>Akkaunt Ulash Yo'riqnomasi</b>\n\n"
+            "Qo'llanmadagi bosqichlarni bajarib, pastdagi qizil tugma orqali "
+            "<b>@Yahyobek_U</b> ga yozing — admin sizga <b>IG Business ID</b> va "
+            "<b>Long-Lived Token</b>ni tayyorlab beradi."
+        ),
+    )
+    if tenant:
+        await call.message.answer(
+            f"🏠 <b>{tenant.business_name}</b> — Bosh menyu:",
+            reply_markup=main_menu_kb(tenant),
+        )
+
+
+@router.callback_query(F.data == "menu:guide")
+async def cb_user_guide(call: CallbackQuery, state: FSMContext) -> None:
+    await state.clear()
+    await call.answer("📖 Qo'llanma yuborilmoqda...")
+    async with AsyncSessionLocal() as db:
+        tenant = await get_tenant_by_tg(db, call.from_user.id)
+
+    pdf_file = get_user_guide_pdf()
+    await call.message.answer_document(
+        document=pdf_file,
+        caption="📖 <b>Reels2Lead CRM — Mijozlar Uchun To'liq Qo'llanma</b>",
+    )
+    if tenant:
+        await call.message.answer(
+            f"🏠 <b>{tenant.business_name}</b> — Bosh menyu:",
+            reply_markup=main_menu_kb(tenant),
+        )
 
 
 # --- Home / Stats ---
@@ -376,8 +426,8 @@ async def cb_ig_menu(call: CallbackQuery, state: FSMContext) -> None:
     await state.set_state(IGConnectFSM.ig_user_id)
     await call.message.edit_text(
         "🔗 <b>Instagram Business Akkauntni Ulash</b>\n\n"
-        "1-qadam: <b>Instagram Business Account ID</b> raqamini yuboring:\n"
-        "<i>(Meta Business Suite / Graph API Explorer'dan olinadi)</i>"
+        "1-qadam: Admin bergan <b>Instagram Business Account ID</b> raqamini yuboring:\n"
+        "<i>(Hali olmagan bo'lsangiz, bosh menyudagi «📘 Akkaunt Ulash Yo'riqnomasi» PDF orqali @Yahyobek_U ga yozing)</i>"
     )
 
 
@@ -774,21 +824,22 @@ async def cb_kw_reels_list(call: CallbackQuery, state: FSMContext) -> None:
     btns = []
     for r in reels[:15]:
         cap = (r.caption_preview or f"Reels #{r.media_id[-6:]}")[:24]
-        tag = "Barchasi" if r.keyword_mode == "ALL" else (r.keywords_csv or "So'zlar")[:18]
+        tag = "Barcha komentlar" if r.keyword_mode == "ALL" else (r.keywords_csv or "So'zlar")[:18]
         btns.append(
             [InlineKeyboardButton(text=f"🎬 {cap} ({tag})", callback_data=f"kw:reel:{r.id}")]
         )
     btns.append([InlineKeyboardButton(text="⬅️ Orqaga", callback_data="menu:scripts")])
 
     await call.message.edit_text(
-        "🔑 <b>Kalit so'zlar (Komment)</b>\n\n"
-        "Kalit so'z kiritish uchun ulangan Reels'lardan birini tanlang:",
+        "🔑 <b>Kalit so'zlar (Komment) — Reels tanlash</b>\n\n"
+        "Sozlash uchun ulangan Reels'lardan birini tanlang:",
         reply_markup=InlineKeyboardMarkup(inline_keyboard=btns),
     )
 
 
 @router.callback_query(F.data.startswith("kw:reel:"))
 async def cb_kw_select_reel(call: CallbackQuery, state: FSMContext) -> None:
+    await state.clear()
     reel_id = int(call.data.split(":")[2])
     async with AsyncSessionLocal() as db:
         tenant = await get_tenant_by_tg(db, call.from_user.id)
@@ -803,24 +854,38 @@ async def cb_kw_select_reel(call: CallbackQuery, state: FSMContext) -> None:
             await call.answer("Reels topilmadi.", show_alert=True)
             return
 
-    await state.set_state(KeywordAddFSM.waiting_keyword)
-    await state.update_data(reel_id=reel.id)
-
     current_info = (
-        "Barcha izohlarga javob bermoqda"
+        "🌐 Hozirgi holat: <b>Barcha komentlar</b>"
         if reel.keyword_mode == "ALL"
-        else f"Hozirgi so'zlar: <code>{reel.keywords_csv}</code>"
+        else f"🔑 Hozirgi so'zlar: <code>{reel.keywords_csv}</code>"
     )
-    rows = []
-    if reel.keyword_mode != "ALL":
-        rows.append([InlineKeyboardButton(text="🌐 Barcha izohlarga o'tkazish", callback_data=f"kw:all:{reel.id}")])
-    rows.append([InlineKeyboardButton(text="⬅️ Orqaga", callback_data="kw:reels")])
-
+    kb = InlineKeyboardMarkup(
+        inline_keyboard=[
+            [InlineKeyboardButton(text="✍️ Izoh kiritish (+)", callback_data=f"kw:input:{reel.id}")],
+            [InlineKeyboardButton(text="🌐 Barcha komentlar", callback_data=f"kw:all:{reel.id}")],
+            [InlineKeyboardButton(text="⬅️ Orqaga", callback_data="kw:reels")],
+        ]
+    )
     await call.message.edit_text(
         f"🎬 <b>{reel.caption_preview or 'Tanlangan Reels'}</b>\n"
-        f"📌 {current_info}\n\n"
-        f"✍️ Qaysi so'z yozilganda bot javob bersin? So'zni yuboring (masalan: <code>+</code> yoki <code>narx</code>):",
-        reply_markup=InlineKeyboardMarkup(inline_keyboard=rows),
+        f"{current_info}\n\n"
+        f"Kerakli rejimni tanlang:",
+        reply_markup=kb,
+    )
+
+
+@router.callback_query(F.data.startswith("kw:input:"))
+async def cb_kw_start_input(call: CallbackQuery, state: FSMContext) -> None:
+    reel_id = int(call.data.split(":")[2])
+    await state.set_state(KeywordAddFSM.waiting_keyword)
+    await state.update_data(reel_id=reel_id)
+    kb = InlineKeyboardMarkup(
+        inline_keyboard=[[InlineKeyboardButton(text="⬅️ Orqaga", callback_data=f"kw:reel:{reel_id}")]]
+    )
+    await call.message.edit_text(
+        "✍️ Qaysi so'z yozilganda bot javob bersin?\n"
+        "Kalit so'zni yuboring (masalan: <code>+</code> yoki <code>narx</code>):",
+        reply_markup=kb,
     )
 
 
@@ -855,7 +920,7 @@ async def cb_kw_set_all(call: CallbackQuery, state: FSMContext) -> None:
             reel.keywords_csv = ""
             await db.commit()
     await state.clear()
-    await call.answer("✅ Barcha izohlarga javob berish yoqildi!", show_alert=True)
+    await call.answer("✅ Barcha komentlarga javob berish tanlandi!", show_alert=True)
     await cb_kw_reels_list(call, state)
 
 
@@ -936,10 +1001,11 @@ async def on_edit_value(message: Message, state: FSMContext) -> None:
     await message.answer("✅ Matn saqlandi!", reply_markup=main_menu_kb(tenant))
 
 
-# --- Tariffs & Reserve Leads Buyout ---
+# --- Tariffs, One-Time Promo Codes & Reserve Leads Buyout ---
 
 @router.callback_query(F.data == "menu:tariffs")
-async def cb_tariffs(call: CallbackQuery) -> None:
+async def cb_tariffs(call: CallbackQuery, state: FSMContext) -> None:
+    await state.clear()
     async with AsyncSessionLocal() as db:
         tenant = await get_tenant_by_tg(db, call.from_user.id)
 
@@ -962,7 +1028,7 @@ async def cb_tariffs(call: CallbackQuery) -> None:
     rows.append([InlineKeyboardButton(text="⬅️ Orqaga", callback_data="menu:home")])
 
     await call.message.edit_text(
-        "💎 <b>C2 — Insta-Lid CRM Tariflari</b>\n\n"
+        "💎 <b>Reels2Lead CRM Tariflari</b>\n\n"
         "<b>BIZNES CRM (C+P+L — Kafolatlangan Lidlar):</b>\n"
         "• Faqat Google Sheets'ga tushgan tayyor raqamlar sanaladi!\n"
         "• Cheksiz Reels & Cheksiz DM | +15/+30/+50/+100 Bonus lidlar.\n\n"
@@ -974,7 +1040,7 @@ async def cb_tariffs(call: CallbackQuery) -> None:
 
 
 @router.callback_query(F.data == "tariffs:switch_bonus")
-async def cb_switch_bonus_mode(call: CallbackQuery) -> None:
+async def cb_switch_bonus_mode(call: CallbackQuery, state: FSMContext) -> None:
     async with AsyncSessionLocal() as db:
         tenant = await get_tenant_by_tg(db, call.from_user.id)
         if not tenant or not tenant.plan_code.startswith("FREE"):
@@ -983,7 +1049,7 @@ async def cb_switch_bonus_mode(call: CallbackQuery) -> None:
         new_plan = "FREE_CPL" if tenant.mode == "CP" else "FREE_CP"
         await apply_plan_to_tenant(db, tenant, new_plan)
     await call.answer(f"✅ Rejim {tenant.mode} ga o'zgartirildi!", show_alert=True)
-    await cb_tariffs(call)
+    await cb_tariffs(call, state)
 
 
 @router.callback_query(F.data == "menu:reserve")
@@ -1035,12 +1101,17 @@ async def cb_buy_plan(call: CallbackQuery, state: FSMContext) -> None:
     await state.update_data(req_type="PLAN", plan_code=plan_code, amount_uzs=spec.price_uzs, reserve_count=0)
 
     pay_link = f"\n🔗 Click/Payme havola: {settings.CLICK_PAY_LINK}" if settings.CLICK_PAY_LINK else ""
+    back_kb = InlineKeyboardMarkup(
+        inline_keyboard=[[InlineKeyboardButton(text="⬅️ Orqaga", callback_data="menu:tariffs")]]
+    )
     await call.message.edit_text(
         f"💳 <b>To'lov — {spec.name}</b>\n"
         f"Summa: <b>{format_uzs(spec.price_uzs)}</b>\n\n"
         f"Karta raqami: <code>{settings.PAYMENT_CARD_NUMBER}</code>\n"
         f"Egasi: <b>{settings.PAYMENT_CARD_HOLDER}</b>{pay_link}\n\n"
-        f"📸 To'lovni amalga oshirib, <b>chek rasmini (skrinshotini)</b> shu yerga yuboring:"
+        f"📸 To'lovni amalga oshirib, <b>chek rasmini (skrinshotini)</b> shu yerga yuboring\n"
+        f"🎟 Yoki <b>1 martalik Promo kod</b>ingiz bo'lsa, kodni matn ko'rinishida yuboring:",
+        reply_markup=back_kb,
     )
 
 
@@ -1057,13 +1128,96 @@ async def cb_buy_reserve(call: CallbackQuery, state: FSMContext) -> None:
     await state.set_state(PaymentFSM.waiting_receipt)
     await state.update_data(req_type="RESERVE", plan_code=None, amount_uzs=total, reserve_count=cnt)
 
+    back_kb = InlineKeyboardMarkup(
+        inline_keyboard=[[InlineKeyboardButton(text="⬅️ Orqaga", callback_data="menu:reserve")]]
+    )
     await call.message.edit_text(
         f"💳 <b>Zaxira Lidlarni Ochish ({cnt} ta)</b>\n"
         f"Summa: <b>{format_uzs(total)}</b>\n\n"
         f"Karta raqami: <code>{settings.PAYMENT_CARD_NUMBER}</code>\n"
         f"Egasi: <b>{settings.PAYMENT_CARD_HOLDER}</b>\n\n"
-        f"📸 To'lov chekini (rasm) shu yerga yuboring:"
+        f"📸 To'lov chekini (rasm) shu yerga yuboring:",
+        reply_markup=back_kb,
     )
+
+
+@router.message(PaymentFSM.waiting_receipt, F.text)
+async def on_payment_promo_code(message: Message, state: FSMContext) -> None:
+    data = await state.get_data()
+    if data.get("req_type") != "PLAN":
+        await message.answer("📸 Zaxira lidlar uchun to'lov cheki rasmini yuboring:")
+        return
+
+    selected_plan_code = data.get("plan_code")
+    spec = PLANS[selected_plan_code]
+    code_input = (message.text or "").strip().upper()
+    back_kb = InlineKeyboardMarkup(
+        inline_keyboard=[[InlineKeyboardButton(text="⬅️ Orqaga", callback_data="menu:tariffs")]]
+    )
+
+    async with AsyncSessionLocal() as db:
+        tenant = await get_tenant_by_tg(db, message.from_user.id)
+        promo = (
+            await db.execute(select(PromoCode).where(PromoCode.code == code_input))
+        ).scalar_one_or_none()
+
+        if not promo:
+            await message.answer(
+                "❌ Bunday promo kod topilmadi.\n\n"
+                "To'g'ri promo kod kiriting yoki to'lov chekini (rasm) yuboring:",
+                reply_markup=back_kb,
+            )
+            return
+
+        if promo.plan_code != selected_plan_code:
+            await message.answer(
+                f"❌ Xatolik! Bu promo kod <b>{spec.name}</b> tarifi uchun emas (boshqa tarif kodi bu paketga tushmaydi).\n\n"
+                f"Shu paketga tegishli promo kodni kiriting yoki to'lov chekini (rasm) yuboring:",
+                reply_markup=back_kb,
+            )
+            return
+
+        if promo.status == 0:
+            await message.answer(
+                "⚠️ Bu promo kod allaqachon <b>ishlatilgan</b> (1 martalik)!\n\n"
+                "Boshqa faol promo kod kiriting yoki to'lov chekini (rasm) yuboring:",
+                reply_markup=back_kb,
+            )
+            return
+
+        if promo.expires_at and promo.expires_at < utcnow():
+            await message.answer(
+                "⌛️ Bu promo kodning amal qilish muddati tugagan.\n\n"
+                "To'lov chekini (rasm) yuboring:",
+                reply_markup=back_kb,
+            )
+            return
+
+        # Valid 1-time promo code! Burn status=0 and activate tariff immediately
+        promo.status = 0
+        promo.used_by_tenant_id = tenant.id
+        promo.used_by_tg_id = message.from_user.id
+        promo.used_at = utcnow()
+
+        await apply_plan_to_tenant(db, tenant, selected_plan_code)
+        await db.refresh(tenant)
+
+    await state.clear()
+    await message.answer(
+        f"🎉 <b>Siz promo koddan foydalandingiz!</b>\n\n"
+        f"✅ Sizga <b>{spec.name}</b> tarifi ochildi va avtomatik faollashtirildi!",
+        reply_markup=main_menu_kb(tenant),
+    )
+
+    if settings.ADMIN_TG_ID:
+        await bot.send_message(
+            settings.ADMIN_TG_ID,
+            f"🎟 <b>PROMO KOD ISHLATILDI!</b>\n\n"
+            f"🏢 Akkaunt: <b>{tenant.business_name}</b> (@{tenant.ig_username or '-'})\n"
+            f"📦 Tarif paketi: <b>{spec.name}</b>\n"
+            f"💵 Summasi: <b>{format_uzs(spec.price_uzs)}</b>\n"
+            f"🔑 Promo kod: <code>{promo.code}</code> (status: 0 — ishlatildi)",
+        )
 
 
 @router.message(PaymentFSM.waiting_receipt, F.photo | F.document)
@@ -1207,11 +1361,15 @@ async def cmd_admin(message: Message) -> None:
                 select(func.count(PaymentRequest.id)).where(PaymentRequest.status == "PENDING")
             )
         ).scalar() or 0
+        promo_active = (
+            await db.execute(select(func.count(PromoCode.id)).where(PromoCode.status == 1))
+        ).scalar() or 0
 
     await message.answer(
-        f"🛡 <b>C2 SaaS — Admin Panel</b>\n\n"
+        f"🛡 <b>Reels2Lead CRM — Admin Panel</b>\n\n"
         f"🏢 Jami bizneslar: <b>{t_cnt}</b>\n"
         f"🎯 Jami yig'ilgan lidlar: <b>{l_cnt}</b>\n"
         f"⚙️ Faol 10s navbatlar: <b>{queue_manager.active_workers_count()}</b>\n"
-        f"💳 Kutilayotgan to'lovlar: <b>{p_cnt}</b>"
+        f"💳 Kutilayotgan to'lovlar: <b>{p_cnt}</b>\n"
+        f"🎟 Faol promo kodlar: <b>{promo_active} / 35</b>"
     )

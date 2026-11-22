@@ -17,7 +17,7 @@ from sqlalchemy import (
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_async_engine
 from sqlalchemy.orm import declarative_base
 
-from config import settings, PLANS, DEFAULT_SCRIPTS
+from config import settings, PLANS, DEFAULT_SCRIPTS, PROMO_CODES_BY_PLAN
 
 
 def _normalize_db_url(raw_url: str) -> str:
@@ -204,6 +204,45 @@ class PaymentRequest(Base):
     created_at = Column(DateTime, default=utcnow)
 
 
+class PromoCode(Base):
+    """One-time tariff-bound promo codes: status=1 (active), status=0 (used)."""
+    __tablename__ = "promo_codes"
+
+    id = Column(Integer, primary_key=True, autoincrement=True)
+    code = Column(String(32), unique=True, nullable=False, index=True)
+    plan_code = Column(String(32), nullable=False, index=True)
+    status = Column(Integer, default=1, nullable=False)  # 1 = active, 0 = used
+    used_by_tenant_id = Column(Integer, nullable=True)
+    used_by_tg_id = Column(BigInteger, nullable=True)
+    used_at = Column(DateTime, nullable=True)
+    expires_at = Column(DateTime, nullable=True)
+    created_at = Column(DateTime, default=utcnow)
+
+
+async def _seed_promo_codes() -> None:
+    expires = utcnow() + datetime.timedelta(days=90)
+    async with AsyncSessionLocal() as db:
+        existing_codes = set(
+            (await db.execute(select(PromoCode.code))).scalars().all()
+        )
+        added = 0
+        for plan_code, codes in PROMO_CODES_BY_PLAN.items():
+            for raw_code in codes:
+                code_up = raw_code.strip().upper()
+                if code_up not in existing_codes:
+                    db.add(
+                        PromoCode(
+                            code=code_up,
+                            plan_code=plan_code,
+                            status=1,
+                            expires_at=expires,
+                        )
+                    )
+                    added += 1
+        if added > 0:
+            await db.commit()
+
+
 async def init_db() -> None:
     async with engine.begin() as conn:
         await conn.run_sync(Base.metadata.create_all)
@@ -218,6 +257,7 @@ async def init_db() -> None:
                 )
             except Exception:
                 pass
+    await _seed_promo_codes()
 
 
 async def get_tenant_by_tg(session: AsyncSession, tg_user_id: int) -> Optional[Tenant]:

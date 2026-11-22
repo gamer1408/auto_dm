@@ -165,6 +165,16 @@ PLANS: Dict[str, PlanSpec] = {
     ),
 }
 
+PROMO_CODES_BY_PLAN: Dict[str, List[str]] = {
+    "CPL_250": ["L250-K7M9P", "L250-R4X8W", "L250-T3N6Q", "L250-V9H2Z", "L250-D5F8J"],
+    "CPL_500": ["L500-B6W3K", "L500-M8P4Y", "L500-Q2R7N", "L500-Z9T5C", "L500-H4G8X"],
+    "CPL_1000": ["L1K-N7V4M", "L1K-P3K9R", "L1K-W8D2T", "L1K-X5F6Z", "L1K-J9Q3B"],
+    "CPL_2500": ["L25K-R6C8V", "L25K-T4M7W", "L25K-Y9P2N", "L25K-G3X5K", "L25K-F8H4Q"],
+    "CP_1K": ["CP1K-M4R9T", "CP1K-W7K2P", "CP1K-Z3N8V", "CP1K-H6X5D", "CP1K-Q9B4Y"],
+    "CP_5K": ["CP5K-T8V3M", "CP5K-K2P7R", "CP5K-N5W9X", "CP5K-D4Q6Z", "CP5K-Y7G2C"],
+    "CP_UNLIM": ["CPUL-P9X4K", "CPUL-R2M7V", "CPUL-W5T8N", "CPUL-B3H6Q", "CPUL-Z8F2Y"],
+}
+
 DEFAULT_SCRIPTS: Dict[str, Dict[str, str]] = {
     "CPL": {
         "comment_reply": "Assalomu alaykum! Batafsil ma'lumotni Direct'ingizga yubordik ✅",
@@ -179,11 +189,11 @@ DEFAULT_SCRIPTS: Dict[str, Dict[str, str]] = {
         "done": "Rahmat! Ma'lumotingiz qabul qilindi ✅ Tez orada {phone} raqamiga bog'lanamiz.",
     },
     "CP": {
-        "comment_reply": "Direct'ingizga havolani yubordik, tekshirib ko'ring! ✅",
+        "comment_reply": "Direct'ingizga yubordim, tekshirib ko'ring! ✨",
         "dm_welcome": (
-            "Assalomu alaykum! So'ragan havolangiz tayyor:\n\n"
-            "{link}\n\n"
-            "Foydali bo'lsa saqlab qo'ying!"
+            "Salom! 👋 Siz uchun ajoyib yechim topib qo'ydim.\n\n"
+            "Hoziroq qo'shilib oling va o'z bonuslaringizni qo'lga kiriting 🎁👇\n"
+            "{link}"
         ),
         "ask_name": "Ismingizni yozing:",
         "ask_phone": "Telefon raqamingizni yozing (+998...):",
